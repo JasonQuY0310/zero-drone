@@ -8,7 +8,6 @@ ros::ServiceClient arming_client;
 ros::ServiceClient takeoff_client;
 ros::ServiceClient set_mode_client;
 
-// 当前状态
 mavros_msgs::State current_state;
 
 void state_cb(const mavros_msgs::State::ConstPtr& msg)
@@ -21,22 +20,14 @@ bool set_mode(const std::string& mode)
     mavros_msgs::SetMode srv;
     srv.request.custom_mode = mode;
 
-    if (set_mode_client.call(srv))
+    if (set_mode_client.call(srv) && srv.response.mode_sent)
     {
-        if (srv.response.mode_sent)
-        {
-            ROS_INFO("Successfully set mode to %s.", mode.c_str());
-            return true;
-        }
-        else
-        {
-            ROS_ERROR("Failed to set mode to %s.", mode.c_str());
-            return false;
-        }
+        ROS_INFO("Mode set to %s", mode.c_str());
+        return true;
     }
     else
     {
-        ROS_ERROR("Failed to call service /mavros/set_mode.");
+        ROS_ERROR("Failed to set mode %s", mode.c_str());
         return false;
     }
 }
@@ -45,14 +36,15 @@ bool takeoff(double altitude)
 {
     mavros_msgs::CommandTOL srv;
     srv.request.altitude = altitude;
-    if (takeoff_client.call(srv))
+
+    if (takeoff_client.call(srv) && srv.response.success)
     {
-        ROS_INFO("Takeoff initiated to %.2f meters", altitude);
+        ROS_INFO("Takeoff successful to %.2f meters.", altitude);
         return true;
     }
     else
     {
-        ROS_ERROR("Failed to call service /mavros/cmd/takeoff.");
+        ROS_ERROR("Failed to call takeoff service.");
         return false;
     }
 }
@@ -62,55 +54,58 @@ int main(int argc, char** argv)
     ros::init(argc, argv, "px4_takeoff_cpp_node");
     ros::NodeHandle nh;
 
-    // 服务客户端初始化
+    // Initialize clients
     arming_client = nh.serviceClient<mavros_msgs::CommandBool>("/mavros/cmd/arming");
     takeoff_client = nh.serviceClient<mavros_msgs::CommandTOL>("/mavros/cmd/takeoff");
     set_mode_client = nh.serviceClient<mavros_msgs::SetMode>("/mavros/set_mode");
 
-    // 订阅飞机状态
-    ros::Subscriber state_sub = nh.subscribe<mavros_msgs::State>("mavros/state", 10, state_cb);
+    ros::Subscriber state_sub = nh.subscribe("mavros/state", 10, state_cb);
 
-    // 等待飞机状态变为ARMED
-    ROS_INFO("Waiting for UAV to be armed...");
-    while (ros::ok() && !current_state.armed)
+    // Wait for FCU connection
+    while (ros::ok() && !current_state.connected)
     {
+        ROS_INFO("Waiting for FCU connection...");
         ros::spinOnce();
-        ros::Duration(0.1).sleep();
+        ros::Duration(0.5).sleep();
     }
 
-    ROS_INFO("Vehicle armed!");
-
-    // 发出解锁命令
+    // Arm the vehicle
     mavros_msgs::CommandBool arm_cmd;
     arm_cmd.request.value = true;
     if (arming_client.call(arm_cmd) && arm_cmd.response.success)
     {
-        ROS_INFO("Vehicle armed");
+        ROS_INFO("Vehicle armed.");
     }
     else
     {
-        ROS_ERROR("Failed to arm vehicle");
+        ROS_ERROR("Failed to arm vehicle.");
         return -1;
     }
 
-    // 等待起飞前的准备
-    ros::Duration(1).sleep();
-
-    // 执行起飞到2米
-    if (takeoff(2.0))
+    // Set mode to GUIDED
+    if (!set_mode("GUIDED"))
     {
-        // 等待起飞后稳定
-        ros::Duration(10).sleep();  // 起飞后保持稳定10秒
+        ROS_ERROR("Failed to set mode to GUIDED.");
+        return -1;
     }
 
-    // 切换到Hold模式
-    if (set_mode("HOLD"))
+    // Wait for mode change
+    ros::Duration(2.0).sleep();
+
+    // Takeoff to 2 meters
+    if (!takeoff(2.0))
     {
-        ROS_INFO("Vehicle in HOLD mode.");
+        return -1;
     }
-    else
+
+    // Wait for stability
+    ros::Duration(10.0).sleep();
+
+    // Switch to HOLD mode
+    if (!set_mode("HOLD"))
     {
-        ROS_ERROR("Failed to set vehicle to HOLD mode.");
+        ROS_ERROR("Failed to set mode to HOLD.");
+        return -1;
     }
 
     ros::spin();
